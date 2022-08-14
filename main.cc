@@ -130,13 +130,9 @@ int main() {
 	auto const sha {shader(2, src_t, src)};
 	if (!sha)
 		return -1;
-	glUseProgram(sha);
-
-	glBindSampler(0, sam);
-	glBindTextureUnit(0, tex);
 
 	GLuint vao;
-	glGenVertexArrays(1, &vao); glBindVertexArray(vao); glBindVertexArray(0);
+	glCreateVertexArrays(1, &vao);
 	glVertexArrayBindingDivisor(vao, 1, 1);
 	glEnableVertexArrayAttrib(vao, 0);
 	glEnableVertexArrayAttrib(vao, 1);
@@ -160,7 +156,6 @@ int main() {
 	};
 	glCreateBuffers(1, &vbo);
 	glNamedBufferStorage(vbo, sizeof(vertex), vertex, 0);
-	glVertexArrayVertexBuffer(vao, 0, vbo, 0, 5*sizeof(GLfloat));
 
 	GLuint ebo;
 	GLuint const element[] {
@@ -168,7 +163,6 @@ int main() {
 	};
 	glCreateBuffers(1, &ebo);
 	glNamedBufferStorage(ebo, sizeof(element), element, 0);
-	glVertexArrayElementBuffer(vao, ebo);
 
 	GLuint abo;
 	GLfloat const instance[] {
@@ -183,8 +177,7 @@ int main() {
 		0.25f,  0.0f,  0.0f, 0.0f
 	};
 	glCreateBuffers(1, &abo);
-	glNamedBufferStorage(abo, sizeof(instance), instance, 0);
-	glVertexArrayVertexBuffer(vao, 1, abo, 0, 4*sizeof(GLfloat));
+	glNamedBufferStorage(abo, sizeof(instance), nullptr, GL_DYNAMIC_STORAGE_BIT);
 
 	auto const ubo_index {glGetProgramResourceIndex(sha, GL_UNIFORM_BLOCK, "ubo")};
 	GLint u_size;
@@ -197,21 +190,28 @@ int main() {
 	auto const u_buffer {new char[u_size]};
 
 	GLuint ubo;
-	glGenBuffers(1, &ubo); glBindBuffer(GL_UNIFORM_BUFFER, ubo); glBindBuffer(GL_UNIFORM_BUFFER, 0);
-	glNamedBufferData(ubo, u_size, nullptr, GL_STATIC_DRAW);
-	glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 0, u_size);
+	glCreateBuffers(1, &ubo);
+	glNamedBufferStorage(ubo, u_size, nullptr, GL_DYNAMIC_STORAGE_BIT);
 
 	GLfloat const color[] {0.0f, 0.0f, 0.0f, 0.0f};
 	GLfloat const depth[] {1.0f};
 
+	glBindTextureUnit(0, tex);
+	glBindSampler(0, sam);
+	glUseProgram(sha);
 	glBindVertexArray(vao);
+	glVertexArrayVertexBuffer(vao, 0, vbo, 0, 5*sizeof(GLfloat));
+	glVertexArrayElementBuffer(vao, ebo);
+	glVertexArrayVertexBuffer(vao, 1, abo, 0, 4*sizeof(GLfloat));
+	glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 0, u_size);
 
 	while (!glfwWindowShouldClose(window)) {
-		memcpy(u_buffer+u_offset[0], &view, 16*sizeof(GLfloat));
+		glNamedBufferSubData(abo, 0, sizeof(instance), instance);
+		memcpy(u_buffer+u_offset[0], &view, sizeof(view));
 		glNamedBufferSubData(ubo, 0, u_size, u_buffer);
 		glClearBufferfv(GL_COLOR, 0, color);
 		glClearBufferfv(GL_DEPTH, 0, depth);
-		glDrawElementsInstanced(GL_TRIANGLES, sizeof(element)/sizeof(GLuint), GL_UNSIGNED_INT, 0, 4*sizeof(instance)/sizeof(GLfloat));
+		glDrawElementsInstanced(GL_TRIANGLES, sizeof(element)/sizeof(GLuint), GL_UNSIGNED_INT, 0, sizeof(instance)/sizeof(GLfloat)/4);
 		glfwSwapBuffers(window);
 		glfwPollEvents();
 	}
