@@ -4,10 +4,21 @@
 #include <zlib.h>
 #include <cstdio>
 #include <iostream>
+#include <thread>
+#include <atomic>
+#include <shared_mutex>
 
 GLuint shader(size_t, GLenum const[], char const* const[]);
 
+GLFWwindow* window;
+std::atomic<bool> terminate;
+
 GLfloat view[16];
+int winfo_w;
+int winfo_h;
+std::shared_mutex winfo_lock;
+
+void render();
 
 int main() {
 	std::ios_base::sync_with_stdio(false);
@@ -16,6 +27,50 @@ int main() {
 	std::cout << "Compiled with libpng " << PNG_LIBPNG_VER_STRING << "; using libpng " << png_libpng_ver << ".\n" << std::flush;
 	std::cout << "Compiled with zlib " << ZLIB_VERSION << "; using zlib " << zlib_version << ".\n" << std::flush;
 
+	glfwInit();
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	window = glfwCreateWindow(1280, 960, "Pacman", nullptr, nullptr);
+	glfwMakeContextCurrent(window);
+	gl3wInit();
+	std::cout << "OpenGL " << glGetString(GL_VERSION) << ", GLSL " << glGetString(GL_SHADING_LANGUAGE_VERSION) << '\n' << std::flush;
+	glfwMakeContextCurrent(nullptr);
+
+	glfwSetWindowRefreshCallback(window, [](GLFWwindow* window) {
+		int w, h;
+		glfwGetFramebufferSize(window, &w, &h);
+		GLfloat r {1.0f}, l {-1.0f}, t {1.0f}, b {-1.0f};
+		if (w > h)
+			l = -(r =  static_cast<GLfloat>(w) / h);
+		else
+			b = -(t =  static_cast<GLfloat>(h) / w);
+		GLfloat const n {-1.0f};
+		GLfloat const f { 1.0f};
+		GLfloat orthographic[] {
+			2.0f/(r-l),       0.0f,        0.0f, -(r+l)/(r-l),
+			      0.0f, 2.0f/(t-b),        0.0f, -(t+b)/(t-b),
+			      0.0f,       0.0f, -2.0f/(f-n), -(f+n)/(f-n),
+			      0.0f,       0.0f,        0.0f,         1.0f
+		};
+		std::unique_lock winfo_write {winfo_lock};
+		memcpy(view, orthographic, sizeof(orthographic));
+		winfo_w = w;
+		winfo_h = h;
+	});
+
+	terminate.store(false, std::memory_order_relaxed);
+	std::thread thread_render {render};
+	while (!glfwWindowShouldClose(window)) {
+		glfwWaitEvents();
+	}
+	terminate.store(true, std::memory_order_relaxed);
+	thread_render.join();
+
+	return 0;
+}
+
+void render() {
 	FILE* file {fopen("image.png", "rb+")};
 	auto png_ptr {png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr)};
 	auto info_ptr {png_create_info_struct(png_ptr)};
@@ -58,35 +113,8 @@ int main() {
 	png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
 	fclose(file);
 
-	glfwInit();
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-	GLFWwindow* window {glfwCreateWindow(1280, 960, "Pacman", nullptr, nullptr)};
-	glfwSetWindowRefreshCallback(window, [](GLFWwindow* window) {
-		int w, h;
-		glfwGetFramebufferSize(window, &w, &h);
-		glViewport(0, 0, w, h);
-		GLfloat r {1.0f}, l {-1.0f}, t {1.0f}, b {-1.0f};
-		if (w > h)
-			l = -(r =  static_cast<GLfloat>(w) / h);
-		else
-			b = -(t =  static_cast<GLfloat>(h) / w);
-		GLfloat const n {-1.0f};
-		GLfloat const f { 1.0f};
-		GLfloat orthographic[] {
-			2.0f/(r-l),       0.0f,        0.0f, -(r+l)/(r-l),
-			      0.0f, 2.0f/(t-b),        0.0f, -(t+b)/(t-b),
-			      0.0f,       0.0f, -2.0f/(f-n), -(f+n)/(f-n),
-			      0.0f,       0.0f,        0.0f,         1.0f
-		};
-		for (size_t i {0}; i < 16; ++i)
-			view[i] = orthographic[i];
-	});
 	glfwMakeContextCurrent(window);
 	glfwSwapInterval(1);
-	gl3wInit();
-	std::cout << "OpenGL " << glGetString(GL_VERSION) << ", GLSL " << glGetString(GL_SHADING_LANGUAGE_VERSION) << '\n' << std::flush;
 	glEnable(GL_DEPTH_TEST);
 
 	GLuint tex;
@@ -129,7 +157,8 @@ int main() {
 	};
 	auto const sha {shader(2, src_t, src)};
 	if (!sha)
-		return -1;
+		// return -1;
+		return;
 
 	GLuint vao;
 	glCreateVertexArrays(1, &vao);
@@ -205,19 +234,21 @@ int main() {
 	glVertexArrayVertexBuffer(vao, 1, abo, 0, 4*sizeof(GLfloat));
 	glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 0, u_size);
 
-	while (!glfwWindowShouldClose(window)) {
+	while (!terminate.load(std::memory_order_relaxed)) {
+		{
+			std::shared_lock winfo_read {winfo_lock};
+			memcpy(u_buffer+u_offset[0], &view, sizeof(view));
+			glViewport(0, 0, winfo_w, winfo_h);
+		}
 		glNamedBufferSubData(abo, 0, sizeof(instance), instance);
-		memcpy(u_buffer+u_offset[0], &view, sizeof(view));
 		glNamedBufferSubData(ubo, 0, u_size, u_buffer);
 		glClearBufferfv(GL_COLOR, 0, color);
 		glClearBufferfv(GL_DEPTH, 0, depth);
 		glDrawElementsInstanced(GL_TRIANGLES, sizeof(element)/sizeof(GLuint), GL_UNSIGNED_INT, 0, sizeof(instance)/sizeof(GLfloat)/4);
 		glfwSwapBuffers(window);
-		glfwPollEvents();
 	}
 
 	delete[] u_buffer;
-	return 0;
 }
 
 GLuint shader(size_t num, GLenum const src_t[], char const* const src[]) {
