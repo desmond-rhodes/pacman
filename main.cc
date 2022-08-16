@@ -7,6 +7,7 @@
 #include <thread>
 #include <atomic>
 #include <shared_mutex>
+#include <chrono>
 
 GLuint shader(size_t, GLenum const[], char const* const[]);
 
@@ -18,6 +19,22 @@ int winfo_w;
 int winfo_h;
 std::shared_mutex winfo_lock;
 
+namespace key { enum { right, left, up, down, AMOUNT }; }
+
+namespace data {
+	size_t constexpr key_press_size {key::AMOUNT};
+	bool key_press[key_press_size];
+	std::shared_mutex key_press_lock;
+
+	size_t constexpr instance_size {4};
+	GLfloat instance_old[instance_size];
+	GLfloat instance_new[instance_size];
+	std::chrono::time_point<std::chrono::steady_clock> instance_time_old;
+	std::chrono::time_point<std::chrono::steady_clock> instance_time_new;
+	std::shared_mutex instance_lock;
+}
+
+void simulate();
 void render();
 
 int main() {
@@ -59,15 +76,96 @@ int main() {
 		winfo_h = h;
 	});
 
+	glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
+		if (action != GLFW_PRESS && action != GLFW_RELEASE)
+			return;
+		bool const state {action == GLFW_PRESS};
+		int id;
+		switch (key) {
+		case GLFW_KEY_RIGHT: id = key::right; break;
+		case GLFW_KEY_LEFT : id = key::left ; break;
+		case GLFW_KEY_UP   : id = key::up   ; break;
+		case GLFW_KEY_DOWN : id = key::down ; break;
+		default: return;
+		}
+		std::unique_lock key_press_write {data::key_press_lock};
+		data::key_press[id] = state;
+	});
+
+	{
+		std::unique_lock key_press_write {data::key_press_lock};
+		for (size_t i {0}; i < key::AMOUNT; ++i)
+			data::key_press[i] = false;
+	}
+
+	{
+		GLfloat const instance[] {0.25f,  0.0f,  0.0f, 0.0f};
+		auto const time_now {std::chrono::steady_clock::now()};
+		std::unique_lock instance_write {data::instance_lock};
+		memcpy(data::instance_old, instance, sizeof(instance));
+		memcpy(data::instance_new, instance, sizeof(instance));
+		data::instance_time_old = time_now;
+		data::instance_time_new = time_now;
+	}
+
 	terminate.store(false, std::memory_order_relaxed);
+	std::thread thread_simulate {simulate};
 	std::thread thread_render {render};
 	while (!glfwWindowShouldClose(window)) {
 		glfwWaitEvents();
 	}
 	terminate.store(true, std::memory_order_relaxed);
+	thread_simulate.join();
 	thread_render.join();
 
 	return 0;
+}
+
+void simulate() {
+	std::chrono::microseconds move_cooldown_duration {500000};
+
+	while (!terminate.load(std::memory_order_relaxed)) {
+		auto const time_now {std::chrono::steady_clock::now()};
+
+		bool key_press[data::key_press_size];
+		{
+			std::shared_lock key_press_read {data::key_press_lock};
+			memcpy(key_press, data::key_press, sizeof(data::key_press));
+		}
+
+		if (!key_press[key::right] && !key_press[key::left] && !key_press[key::up] && !key_press[key::down])
+			continue;
+
+		GLfloat instance_old[data::instance_size];
+		GLfloat instance_new[data::instance_size];
+		std::chrono::time_point<std::chrono::steady_clock> instance_time_old;
+		std::chrono::time_point<std::chrono::steady_clock> instance_time_new;
+		{
+			std::shared_lock instance_read {data::instance_lock};
+			if (time_now < data::instance_time_new)
+				continue;
+			memcpy(instance_old, data::instance_old, sizeof(data::instance_old));
+			memcpy(instance_new, data::instance_new, sizeof(data::instance_new));
+			instance_time_old = data::instance_time_old;
+			instance_time_new = data::instance_time_new;
+		}
+
+		memcpy(instance_old, instance_new, sizeof(instance_new));
+		instance_time_old = time_now;
+		if (key_press[key::right]) instance_new[1] += 0.5f;
+		if (key_press[key::left ]) instance_new[1] -= 0.5f;
+		if (key_press[key::up   ]) instance_new[2] += 0.5f;
+		if (key_press[key::down ]) instance_new[2] -= 0.5f;
+		instance_time_new = time_now + move_cooldown_duration;
+
+		{
+			std::unique_lock instance_write {data::instance_lock};
+			memcpy(data::instance_old, instance_old, sizeof(instance_old));
+			memcpy(data::instance_new, instance_new, sizeof(instance_new));
+			data::instance_time_old = instance_time_old;
+			data::instance_time_new = instance_time_new;
+		}
+	}
 }
 
 void render() {
@@ -127,6 +225,8 @@ void render() {
 	glCreateSamplers(1, &sam);
 	glSamplerParameteri(sam, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glSamplerParameteri(sam, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glSamplerParameteri(sam, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glSamplerParameteri(sam, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 
 	GLenum const src_t[] {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
 	char const* const src[] {
@@ -194,19 +294,8 @@ void render() {
 	glNamedBufferStorage(ebo, sizeof(element), element, 0);
 
 	GLuint abo;
-	GLfloat const instance[] {
-		0.25f,  0.5f,  0.5f, 0.0f,
-		0.25f,  0.0f,  0.5f, 0.0f,
-		0.25f, -0.5f,  0.5f, 0.0f,
-		0.25f, -0.5f,  0.0f, 0.0f,
-		0.25f, -0.5f, -0.5f, 0.0f,
-		0.25f,  0.0f, -0.5f, 0.0f,
-		0.25f,  0.5f, -0.5f, 0.0f,
-		0.25f,  0.5f,  0.0f, 0.0f,
-		0.25f,  0.0f,  0.0f, 0.0f
-	};
 	glCreateBuffers(1, &abo);
-	glNamedBufferStorage(abo, sizeof(instance), nullptr, GL_DYNAMIC_STORAGE_BIT);
+	glNamedBufferStorage(abo, data::instance_size*sizeof(GLfloat), nullptr, GL_DYNAMIC_STORAGE_BIT);
 
 	auto const ubo_index {glGetProgramResourceIndex(sha, GL_UNIFORM_BLOCK, "ubo")};
 	GLint u_size;
@@ -235,16 +324,40 @@ void render() {
 	glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 0, u_size);
 
 	while (!terminate.load(std::memory_order_relaxed)) {
+		auto const time_now {std::chrono::steady_clock::now()};
+
 		{
 			std::shared_lock winfo_read {winfo_lock};
 			memcpy(u_buffer+u_offset[0], &view, sizeof(view));
 			glViewport(0, 0, winfo_w, winfo_h);
 		}
+		GLfloat instance_old[data::instance_size];
+		GLfloat instance_new[data::instance_size];
+		std::chrono::time_point<std::chrono::steady_clock> instance_time_old;
+		std::chrono::time_point<std::chrono::steady_clock> instance_time_new;
+		{
+			std::shared_lock instance_read {data::instance_lock};
+			memcpy(instance_old, data::instance_old, sizeof(data::instance_old));
+			memcpy(instance_new, data::instance_new, sizeof(data::instance_new));
+			instance_time_old = data::instance_time_old;
+			instance_time_new = data::instance_time_new;
+		}
+
+		GLfloat instance_range[data::instance_size];
+		for (size_t i {0}; i < data::instance_size; ++i)
+			instance_range[i] = instance_new[i] - instance_old[i];
+
+		double const percent {std::max(std::min(static_cast<double>((time_now-instance_time_old).count())/(instance_time_new-instance_time_old).count(), 1.0), 0.0)};
+
+		GLfloat instance[data::instance_size];
+		for (size_t i {0}; i < data::instance_size; ++i)
+			instance[i] = instance_old[i] + instance_range[i] * percent;
+
 		glNamedBufferSubData(abo, 0, sizeof(instance), instance);
 		glNamedBufferSubData(ubo, 0, u_size, u_buffer);
 		glClearBufferfv(GL_COLOR, 0, color);
 		glClearBufferfv(GL_DEPTH, 0, depth);
-		glDrawElementsInstanced(GL_TRIANGLES, sizeof(element)/sizeof(GLuint), GL_UNSIGNED_INT, 0, sizeof(instance)/sizeof(GLfloat)/4);
+		glDrawElementsInstanced(GL_TRIANGLES, sizeof(element)/sizeof(GLuint), GL_UNSIGNED_INT, 0, data::instance_size/4);
 		glfwSwapBuffers(window);
 	}
 
