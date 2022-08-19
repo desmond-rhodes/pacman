@@ -19,11 +19,12 @@ int winfo_w;
 int winfo_h;
 std::shared_mutex winfo_lock;
 
-namespace key { enum { right, left, up, down, AMOUNT }; }
+namespace key { enum { right, left, up, down }; }
 
 namespace data {
-	size_t constexpr key_press_size {key::AMOUNT};
+	size_t constexpr key_press_size {4};
 	bool key_press[key_press_size];
+	std::chrono::time_point<std::chrono::steady_clock> key_press_time;
 	std::shared_mutex key_press_lock;
 
 	size_t constexpr instance_size {4};
@@ -90,12 +91,14 @@ int main() {
 		}
 		std::unique_lock key_press_write {data::key_press_lock};
 		data::key_press[id] = state;
+		data::key_press_time = std::chrono::steady_clock::now();
 	});
 
 	{
 		std::unique_lock key_press_write {data::key_press_lock};
-		for (size_t i {0}; i < key::AMOUNT; ++i)
+		for (size_t i {0}; i < data::key_press_size; ++i)
 			data::key_press[i] = false;
+		data::key_press_time = std::chrono::steady_clock::now();
 	}
 
 	{
@@ -124,13 +127,27 @@ int main() {
 void simulate() {
 	std::chrono::microseconds move_cooldown_duration {500000};
 
+	bool key_press_deferred {false};
+	auto key_press_deferred_time {std::chrono::steady_clock::now()};
+	std::chrono::microseconds key_press_deferred_duration {50000};
+
 	while (!terminate.load(std::memory_order_relaxed)) {
 		auto const time_now {std::chrono::steady_clock::now()};
 
 		bool key_press[data::key_press_size];
-		{
+		if (key_press_deferred) {
+			if (key_press_deferred_time < time_now) {
+				key_press_deferred = false;
+				std::shared_lock key_press_read {data::key_press_lock};
+				memcpy(key_press, data::key_press, sizeof(data::key_press));
+			}
+		}
+		else {
 			std::shared_lock key_press_read {data::key_press_lock};
-			memcpy(key_press, data::key_press, sizeof(data::key_press));
+			if (key_press_deferred_time < data::key_press_time) {
+				key_press_deferred = true;
+				key_press_deferred_time = time_now + key_press_deferred_duration;
+			}
 		}
 
 		if (!key_press[key::right] && !key_press[key::left] && !key_press[key::up] && !key_press[key::down])
