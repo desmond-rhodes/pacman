@@ -23,10 +23,10 @@ int winfo_w;
 int winfo_h;
 std::shared_mutex winfo_lock;
 
-namespace key { enum { right, left, up, down }; }
+namespace key { enum { right, left, up, down, w, a, s, d, zero }; }
 
 namespace data {
-	size_t constexpr key_press_size {4};
+	size_t constexpr key_press_size {9};
 	bool key_press[key_press_size];
 	std::chrono::time_point<std::chrono::steady_clock> key_press_time;
 	std::shared_mutex key_press_lock;
@@ -100,6 +100,11 @@ int main() {
 		case GLFW_KEY_LEFT : id = key::left ; break;
 		case GLFW_KEY_UP   : id = key::up   ; break;
 		case GLFW_KEY_DOWN : id = key::down ; break;
+		case GLFW_KEY_W    : id = key::w    ; break;
+		case GLFW_KEY_A    : id = key::a    ; break;
+		case GLFW_KEY_S    : id = key::s    ; break;
+		case GLFW_KEY_D    : id = key::d    ; break;
+		case GLFW_KEY_0    : id = key::zero ; break;
 		default: return;
 		}
 		std::unique_lock key_press_write {data::key_press_lock};
@@ -176,7 +181,13 @@ void simulate() {
 			continue;
 		tick_last = tick_now;
 
-		if (!key_press[key::right] && !key_press[key::left] && !key_press[key::up] && !key_press[key::down])
+		if (!(
+			key_press[key::right] || key_press[key::d] ||
+			key_press[key::left ] || key_press[key::a] ||
+			key_press[key::up   ] || key_press[key::w] ||
+			key_press[key::down ] || key_press[key::s] ||
+			key_press[key::zero ]
+		))
 			continue;
 
 		GLfloat instance_old[data::instance_size];
@@ -185,7 +196,7 @@ void simulate() {
 		double instance_time_new;
 		{
 			std::shared_lock instance_read {data::instance_lock};
-			if (tick_now < data::instance_time_new)
+			if (tick_now < data::instance_time_new && !key_press[key::zero])
 				continue;
 			memcpy(instance_old, data::instance_old, sizeof(data::instance_old));
 			memcpy(instance_new, data::instance_new, sizeof(data::instance_new));
@@ -193,13 +204,21 @@ void simulate() {
 			instance_time_new = data::instance_time_new;
 		}
 
-		memcpy(instance_old, instance_new, sizeof(instance_new));
-		instance_time_old = tick_now;
-		if (key_press[key::right]) instance_new[1] += 0.5f;
-		if (key_press[key::left ]) instance_new[1] -= 0.5f;
-		if (key_press[key::up   ]) instance_new[2] += 0.5f;
-		if (key_press[key::down ]) instance_new[2] -= 0.5f;
-		instance_time_new = tick_now + move_cooldown_duration;
+		if (key_press[key::zero]) {
+			instance_new[1] = 0.0f;
+			instance_new[2] = 0.0f;
+			memcpy(instance_old, instance_new, sizeof(instance_new));
+			instance_time_new = tick_now;
+		}
+		else {
+			memcpy(instance_old, instance_new, sizeof(instance_new));
+			instance_time_old = tick_now;
+			if (key_press[key::right] || key_press[key::d]) instance_new[1] += 0.5f;
+			if (key_press[key::left ] || key_press[key::a]) instance_new[1] -= 0.5f;
+			if (key_press[key::up   ] || key_press[key::w]) instance_new[2] += 0.5f;
+			if (key_press[key::down ] || key_press[key::s]) instance_new[2] -= 0.5f;
+			instance_time_new = tick_now + move_cooldown_duration;
+		}
 
 		{
 			std::unique_lock instance_write {data::instance_lock};
