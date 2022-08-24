@@ -127,6 +127,11 @@ int main() {
 void simulate() {
 	std::chrono::microseconds move_cooldown_duration {500000};
 
+	bool key_press[data::key_press_size];
+	{
+		std::shared_lock key_press_read {data::key_press_lock};
+		memcpy(key_press, data::key_press, sizeof(data::key_press));
+	}
 	bool key_press_deferred {false};
 	auto key_press_deferred_time {std::chrono::steady_clock::now()};
 	std::chrono::microseconds key_press_deferred_duration {50000};
@@ -134,7 +139,6 @@ void simulate() {
 	while (!terminate.load(std::memory_order_relaxed)) {
 		auto const time_now {std::chrono::steady_clock::now()};
 
-		bool key_press[data::key_press_size];
 		if (key_press_deferred) {
 			if (key_press_deferred_time < time_now) {
 				key_press_deferred = false;
