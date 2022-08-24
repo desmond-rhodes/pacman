@@ -11,6 +11,10 @@
 
 GLuint shader(size_t, GLenum const[], char const* const[]);
 
+void tick_reset(double);
+void tick_modify(double);
+double tick();
+
 GLFWwindow* window;
 std::atomic<bool> terminate;
 
@@ -30,8 +34,8 @@ namespace data {
 	size_t constexpr instance_size {4};
 	GLfloat instance_old[instance_size];
 	GLfloat instance_new[instance_size];
-	std::chrono::time_point<std::chrono::steady_clock> instance_time_old;
-	std::chrono::time_point<std::chrono::steady_clock> instance_time_new;
+	double instance_time_old;
+	double instance_time_new;
 	std::shared_mutex instance_lock;
 }
 
@@ -78,6 +82,15 @@ int main() {
 	});
 
 	glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
+		static double tick_rate {1.0};
+		if (key == GLFW_KEY_T && action == GLFW_PRESS) {
+			tick_rate += (mods == GLFW_MOD_SHIFT) ? -0.5 : 0.5;
+			if (tick_rate > 5.0) tick_rate = 0.0;
+			if (tick_rate < 0.0) tick_rate = 5.0;
+			tick_modify(tick_rate);
+			std::cout << "TICK RATE " << tick_rate << "\n" << std::flush;
+		}
+
 		if (action != GLFW_PRESS && action != GLFW_RELEASE)
 			return;
 		bool const state {action == GLFW_PRESS};
@@ -94,6 +107,8 @@ int main() {
 		data::key_press_time = std::chrono::steady_clock::now();
 	});
 
+	tick_reset(1.0);
+
 	{
 		std::unique_lock key_press_write {data::key_press_lock};
 		for (size_t i {0}; i < data::key_press_size; ++i)
@@ -103,12 +118,12 @@ int main() {
 
 	{
 		GLfloat const instance[] {0.25f,  0.0f,  0.0f, 0.0f};
-		auto const time_now {std::chrono::steady_clock::now()};
+		auto const tick_now {tick()};
 		std::unique_lock instance_write {data::instance_lock};
 		memcpy(data::instance_old, instance, sizeof(instance));
 		memcpy(data::instance_new, instance, sizeof(instance));
-		data::instance_time_old = time_now;
-		data::instance_time_new = time_now;
+		data::instance_time_old = tick_now;
+		data::instance_time_new = tick_now;
 	}
 
 	terminate.store(false, std::memory_order_relaxed);
@@ -125,7 +140,7 @@ int main() {
 }
 
 void simulate() {
-	std::chrono::microseconds move_cooldown_duration {500000};
+	double move_cooldown_duration {0.5};
 
 	bool key_press[data::key_press_size];
 	{
@@ -134,10 +149,13 @@ void simulate() {
 	}
 	bool key_press_deferred {false};
 	auto key_press_deferred_time {std::chrono::steady_clock::now()};
-	std::chrono::microseconds key_press_deferred_duration {50000};
+	std::chrono::microseconds key_press_deferred_duration {33333};
+
+	auto tick_last {tick()};
 
 	while (!terminate.load(std::memory_order_relaxed)) {
 		auto const time_now {std::chrono::steady_clock::now()};
+		auto const tick_now {tick()};
 
 		if (key_press_deferred) {
 			if (key_press_deferred_time < time_now) {
@@ -154,16 +172,20 @@ void simulate() {
 			}
 		}
 
+		if (tick_now == tick_last)
+			continue;
+		tick_last = tick_now;
+
 		if (!key_press[key::right] && !key_press[key::left] && !key_press[key::up] && !key_press[key::down])
 			continue;
 
 		GLfloat instance_old[data::instance_size];
 		GLfloat instance_new[data::instance_size];
-		std::chrono::time_point<std::chrono::steady_clock> instance_time_old;
-		std::chrono::time_point<std::chrono::steady_clock> instance_time_new;
+		double instance_time_old;
+		double instance_time_new;
 		{
 			std::shared_lock instance_read {data::instance_lock};
-			if (time_now < data::instance_time_new)
+			if (tick_now < data::instance_time_new)
 				continue;
 			memcpy(instance_old, data::instance_old, sizeof(data::instance_old));
 			memcpy(instance_new, data::instance_new, sizeof(data::instance_new));
@@ -172,12 +194,12 @@ void simulate() {
 		}
 
 		memcpy(instance_old, instance_new, sizeof(instance_new));
-		instance_time_old = time_now;
+		instance_time_old = tick_now;
 		if (key_press[key::right]) instance_new[1] += 0.5f;
 		if (key_press[key::left ]) instance_new[1] -= 0.5f;
 		if (key_press[key::up   ]) instance_new[2] += 0.5f;
 		if (key_press[key::down ]) instance_new[2] -= 0.5f;
-		instance_time_new = time_now + move_cooldown_duration;
+		instance_time_new = tick_now + move_cooldown_duration;
 
 		{
 			std::unique_lock instance_write {data::instance_lock};
@@ -345,7 +367,7 @@ void render() {
 	glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 0, u_size);
 
 	while (!terminate.load(std::memory_order_relaxed)) {
-		auto const time_now {std::chrono::steady_clock::now()};
+		auto const tick_now {tick()};
 
 		{
 			std::shared_lock winfo_read {winfo_lock};
@@ -354,8 +376,8 @@ void render() {
 		}
 		GLfloat instance_old[data::instance_size];
 		GLfloat instance_new[data::instance_size];
-		std::chrono::time_point<std::chrono::steady_clock> instance_time_old;
-		std::chrono::time_point<std::chrono::steady_clock> instance_time_new;
+		double instance_time_old;
+		double instance_time_new;
 		{
 			std::shared_lock instance_read {data::instance_lock};
 			memcpy(instance_old, data::instance_old, sizeof(data::instance_old));
@@ -368,7 +390,7 @@ void render() {
 		for (size_t i {0}; i < data::instance_size; ++i)
 			instance_range[i] = instance_new[i] - instance_old[i];
 
-		double const percent {std::max(std::min(static_cast<double>((time_now-instance_time_old).count())/(instance_time_new-instance_time_old).count(), 1.0), 0.0)};
+		double const percent {std::max(std::min((tick_now-instance_time_old)/(instance_time_new-instance_time_old), 1.0), 0.0)};
 
 		GLfloat instance[data::instance_size];
 		for (size_t i {0}; i < data::instance_size; ++i)
@@ -415,4 +437,33 @@ GLuint shader(size_t num, GLenum const src_t[], char const* const src[]) {
 		glDeleteShader(obj[i]);
 	delete[] obj;
 	return pro;
+}
+
+double tick_cumulative;
+std::chrono::time_point<std::chrono::steady_clock> time_zero;
+double tick_rate;
+std::shared_mutex tick_lock;
+
+double tick_time(double cumulative, std::chrono::time_point<std::chrono::steady_clock> zero, double rate, std::chrono::time_point<std::chrono::steady_clock> now) {
+	return cumulative + std::chrono::duration_cast<std::chrono::nanoseconds>(now-zero).count() / 1000000000.0 * rate;
+}
+
+void tick_reset(double rate) {
+	std::unique_lock tick_write {tick_lock};
+	tick_cumulative = 0.0;
+	time_zero = std::chrono::steady_clock::now();
+	tick_rate = rate;
+}
+
+void tick_modify(double rate) {
+	std::unique_lock tick_write {tick_lock};
+	auto const time_now {std::chrono::steady_clock::now()};
+	tick_cumulative = tick_time(tick_cumulative, time_zero, tick_rate, time_now);
+	time_zero = time_now;
+	tick_rate = rate;
+}
+
+double tick() {
+	std::shared_lock tick_read {tick_lock};
+	return tick_time(tick_cumulative, time_zero, tick_rate, std::chrono::steady_clock::now());
 }
